@@ -68,8 +68,8 @@ POSITION_SIZE_PCT = 0.95  # Use 95% of available USD per trade
 TAKER_FEE_RATE = 0.001  # 0.1% taker fee (for P&L calculation)
 
 # Bot Timing
-POLL_INTERVAL = 10  # Seconds between price checks
-WARMUP_POLL = 2  # Faster polling during RSI warmup
+POLL_INTERVAL = 60  # Seconds between price checks
+WARMUP_POLL = 10  # Faster polling during RSI warmup
 
 # Logging
 LOG_FILE = "rsi_bot.log"
@@ -92,6 +92,45 @@ log = logging.getLogger("RSI-Bot")
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  DATA CLASSES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def print_tick(self, price, rsi_val, signal, detail):
+    """Show wallet + position every tick."""
+    tick = self.state.tick_count
+    utc_now = datetime.now(timezone.utc).strftime("%H:%M")
+
+    # Fetch wallet
+    try:
+        bal = self.client.balance()
+        wallet = bal.get("Wallet", {})
+        usd_free = wallet.get("USD", {}).get("Free", 0)
+        usd_lock = wallet.get("USD", {}).get("Lock", 0)
+        btc_free = wallet.get(COIN, {}).get("Free", 0)
+        btc_lock = wallet.get(COIN, {}).get("Lock", 0)
+    except:
+        usd_free = usd_lock = btc_free = btc_lock = 0
+
+    btc_value = (btc_free + btc_lock) * price
+    total_equity = usd_free + usd_lock + btc_value
+
+    if self.state.position:
+        pos = self.state.position
+        pos_pnl = (price / pos.entry_price - 1) * 100
+        ticks_held = tick - pos.entry_tick
+        sl_price = pos.entry_price * (1 - SL_PERCENT)
+        pos_line = (
+            f"  POSITION: LONG {pos.units:.6f} {COIN} @ ${pos.entry_price:,.2f} | "
+            f"P&L={pos_pnl:+.2f}% | Held={ticks_held}/{MAX_HOLDING_TICKS} | "
+            f"SL=${sl_price:,.2f}"
+        )
+    else:
+        pos_line = "  POSITION: FLAT"
+
+    log.info("")
+    log.info(f"=== TICK {tick} === {utc_now} UTC === {PAIR} ${price:,.2f} === RSI={rsi_val:.1f} ===")
+    log.info(f"  WALLET:   ${usd_free:,.2f} USD free | ${usd_lock:,.2f} locked | "
+             f"{btc_free:.6f} {COIN} free | {btc_lock:.6f} locked")
+    log.info(f"  EQUITY:   ${total_equity:,.2f}")
+    log.info(pos_line)
+    log.info(f"  SIGNAL:   [{signal}] {detail}")
 
 @dataclass
 class Position:
@@ -589,21 +628,14 @@ class TradingBot:
 
                 # 2. Branch: are we in a position or flat?
                 if self.state.position is None:
-                    # ── FLAT: Check for entry ──
                     should_enter, rsi_val, reason = self.strategy.check_entry(price)
 
-                    pos_str = "FLAT"
-                    log.info(
-                        f"{tick:>5} │ ${price:>10,.2f} │ "
-                        f"{rsi_val:>5.1f} │ {pos_str:^10} │ {reason}"
-                    )
+                    self.print_tick(price, rsi_val, "SCANNING", reason)
 
                     if should_enter:
                         self.open_position(price, rsi_val)
 
                 else:
-                    # ── IN POSITION: Feed price to RSI, then check exit ──
-                    # Update RSI with new price
                     self.strategy.rsi.update(price)
 
                     should_exit, reason = self.strategy.check_exit(
@@ -611,13 +643,8 @@ class TradingBot:
                     )
 
                     rsi_val = self.strategy.rsi._calc_rsi() if self.strategy.rsi.ready else 0
-                    pnl_pct = (price / self.state.position.entry_price - 1) * 100
-                    pos_str = f"LONG {pnl_pct:+.1f}%"
 
-                    log.info(
-                        f"{tick:>5} │ ${price:>10,.2f} │ "
-                        f"{rsi_val:>5.1f} │ {pos_str:^10} │ {reason}"
-                    )
+                    self.print_tick(price, rsi_val, "HOLDING", reason)
 
                     if should_exit:
                         self.close_position(price, reason)
