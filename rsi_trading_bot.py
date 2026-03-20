@@ -381,7 +381,7 @@ class TradingBot:
         # Auth + balance
         try:
             bal = self.client.balance()
-            wallet = bal.get("Wallet", {})
+            wallet = bal.get("SpotWallet", {})
             usd_free = wallet.get("USD", {}).get("Free", 0)
             btc_free = wallet.get(COIN, {}).get("Free", 0)
             self.state.initial_capital = usd_free
@@ -424,14 +424,14 @@ class TradingBot:
     def get_usd_free(self) -> float:
         try:
             bal = self.client.balance()
-            return bal.get("Wallet", {}).get("USD", {}).get("Free", 0)
+            return bal.get("SpotWallet", {}).get("USD", {}).get("Free", 0)
         except:
             return 0
 
     def get_coin_free(self) -> float:
         try:
             bal = self.client.balance()
-            return bal.get("Wallet", {}).get(COIN, {}).get("Free", 0)
+            return bal.get("SpotWallet", {}).get(COIN, {}).get("Free", 0)
         except:
             return 0
 
@@ -562,7 +562,7 @@ class TradingBot:
         # Fetch wallet
         try:
             bal = self.client.balance()
-            wallet = bal.get("Wallet", {})
+            wallet = bal.get("SpotWallet", {})
             usd_free = wallet.get("USD", {}).get("Free", 0)
             usd_lock = wallet.get("USD", {}).get("Lock", 0)
             btc_free = wallet.get(COIN, {}).get("Free", 0)
