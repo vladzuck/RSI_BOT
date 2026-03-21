@@ -132,3 +132,8 @@ else:
 print("\n" + "=" * 55)
 print("  Bot runs independently on EC2.")
 print("=" * 55)
+
+'''
+tail -50 ~/RSI_BOT/rsi_bot.log
+to check last logs
+'''
