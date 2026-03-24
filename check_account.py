@@ -6,8 +6,8 @@ Usage: python3 check_account.py
 import requests, time, hmac, hashlib, json
 from datetime import datetime, timezone
 
-KEY = "p2cZ7IzInbWjIdGIMC7pV5C7tMf2IAd53XU01R2sLBdJ5b4fzTZdSXxFzKBmrNpL"
-SEC = "1auQZH6CyibwRT1qoW5QX0m9aTPdUyMchcnfH5mYEkwc4l9jalQTbFwdrcCe3do4"
+KEY = "pZZ9zVTcKdin9QtSpq4slzYtUDFDf1j1OSCh503YO2UyADi1uKl2y5zAyvFmKAkf"
+SEC = "l8Zb6ebZi2RZcXZE6XCJUg8qOdHgb3sStveWr7Nj96MS8MteMyWSWG5Cku570Qk2"
 URL = "https://mock-api.roostoo.com"
 
 def sign(params=""):
