@@ -8,11 +8,11 @@ BASE_URL = "https://mock-api.roostoo.com"
 
 PAIR = "STO/USD"
 COIN = "STO"
-QTY_DECIMALS = 2
+QTY_DECIMALS = 0
 POLL_INTERVAL = 60
 RSI_PERIOD = 7
 RSI_THRESHOLD = 50
-TAKE_PROFIT_PCT = 0.02      # +2%
+TAKE_PROFIT_PCT = 0.03      # +2%
 STOP_LOSS_PCT = 0.018       # -1.8%
 
 logging.basicConfig(
