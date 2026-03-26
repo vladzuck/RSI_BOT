@@ -1,9 +1,3 @@
-"""
-  FLATTEN + IDLE BOT
-  1. Sells all BTC on startup
-  2. Runs a "strategy" that never triggers (RSI < 1)
-"""
-
 import requests, time, hmac, hashlib, logging, math, functools
 from datetime import datetime, timezone
 from collections import deque
@@ -12,10 +6,14 @@ API_KEY = "pZZ9zVTcKdin9QtSpq4slzYtUDFDf1j1OSCh503YO2UyADi1uKl2y5zAyvFmKAkf"
 SECRET_KEY = "l8Zb6ebZi2RZcXZE6XCJUg8qOdHgb3sStveWr7Nj96MS8MteMyWSWG5Cku570Qk2"
 BASE_URL = "https://mock-api.roostoo.com"
 
-PAIR = "BTC/USD"
-COIN = "BTC"
+PAIR = "STO/USD"
+COIN = "STO"
 QTY_DECIMALS = 2
 POLL_INTERVAL = 60
+RSI_PERIOD = 7
+RSI_THRESHOLD = 50
+TAKE_PROFIT_PCT = 0.02      # +2%
+STOP_LOSS_PCT = 0.018       # -1.8%
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +53,10 @@ class API:
         return {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sig}, payload, sp
 
     @retry()
+    def exchange_info(self):
+        return self.s.get(f"{BASE_URL}/v3/exchangeInfo", timeout=10).json()
+
+    @retry()
     def ticker(self, pair):
         return self.s.get(f"{BASE_URL}/v3/ticker", params={"timestamp": self._ts(), "pair": pair}, timeout=10).json()
 
@@ -72,13 +74,27 @@ class API:
 
 api = API()
 
-def get_btc_holding():
-    bal = api.balance()
-    w = bal.get("SpotWallet", bal.get("Wallet", {}))
-    free = w.get(COIN, {}).get("Free", 0)
-    lock = w.get(COIN, {}).get("Lock", 0)
-    usd = w.get("USD", {}).get("Free", 0)
-    return free, lock, usd
+def calc_rsi(prices, period=7):
+    if len(prices) < period + 1:
+        return None
+    data = list(prices)
+    gains = []
+    losses = []
+    for i in range(1, len(data)):
+        d = data[i] - data[i - 1]
+        gains.append(max(0, d))
+        losses.append(max(0, -d))
+    if len(gains) < period:
+        return None
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
 def get_price():
     d = api.ticker(PAIR)
@@ -86,78 +102,156 @@ def get_price():
         return d["Data"][PAIR]["LastPrice"]
     return None
 
-def sell_all_btc():
-    free, lock, usd = get_btc_holding()
-    total = free + lock
-    log.info(f"  BTC: {total:.6f} (free={free:.6f} lock={lock:.6f})")
-    log.info(f"  USD: ${usd:,.2f}")
+def get_usd():
+    bal = api.balance()
+    w = bal.get("SpotWallet", bal.get("Wallet", {}))
+    return w.get("USD", {}).get("Free", 0)
 
-    if total < 0.001:
-        log.info("  No BTC to sell. Already flat.")
-        return
+def get_qty_decimals():
+    """Get quantity precision from exchange info."""
+    try:
+        info = api.exchange_info()
+        pairs = info.get("TradePairs", {})
+        if PAIR in pairs:
+            step = pairs[PAIR].get("StepSize", None)
+            if step:
+                step_str = str(step)
+                if '.' in step_str:
+                    return len(step_str.rstrip('0').split('.')[-1])
+        log.info(f"  {PAIR} found, using default {QTY_DECIMALS} decimals")
+    except Exception as e:
+        log.warning(f"  Could not get step size: {e}")
+    return QTY_DECIMALS
 
-    price = get_price()
-    if not price:
-        log.error("  Can't get price!")
-        return
+def buy_all(price, decimals):
+    usd = get_usd()
+    alloc = usd * 0.99  # 99% to leave room for rounding
+    if alloc < 5:
+        log.warning(f"  Not enough USD (${usd:.2f})")
+        return False
 
-    factor = 10 ** QTY_DECIMALS
-    qty = math.floor(total * factor) / factor
+    factor = 10 ** decimals
+    qty = math.floor((alloc * 0.999) / price * factor) / factor
     if qty <= 0:
-        log.info("  BTC amount too small to sell.")
-        return
+        log.warning(f"  Qty too small after rounding")
+        return False
 
-    value = qty * price
-    log.info(f"  Selling {qty} BTC @ ~${price:,.2f} (${value:,.2f})")
+    log.info(f"  >>> BUY {COIN} {qty} @ ~${price:,.4f} (${alloc:,.2f}) <<<")
+
+    r = api.place_order(PAIR, "BUY", qty)
+    if r.get("Success"):
+        d = r["OrderDetail"]
+        fp = d.get("FilledAverPrice", price)
+        fq = d.get("FilledQuantity", qty)
+        oid = d.get("OrderID", 0)
+        log.info(f"  FILLED #{oid} {COIN} {fq} @ ${fp:,.4f}")
+        return True, fp, fq
+    else:
+        log.warning(f"  Rejected: {r.get('ErrMsg')}")
+        return False, 0, 0
+
+def sell_all(price, units, decimals, reason):
+    factor = 10 ** decimals
+    qty = math.floor(units * factor) / factor
+    if qty <= 0:
+        log.error(f"  Sell qty 0 (units={units})")
+        return False
+
+    log.info(f"  >>> SELL {COIN} {qty} @ ~${price:,.4f} | {reason} <<<")
 
     r = api.place_order(PAIR, "SELL", qty)
     if r.get("Success"):
         d = r["OrderDetail"]
         ep = d.get("FilledAverPrice", price)
         oid = d.get("OrderID", 0)
-        log.info(f"  SOLD #{oid} @ ${ep:,.2f}")
+        log.info(f"  SOLD #{oid} {COIN} @ ${ep:,.4f} | {reason}")
+        return True
     else:
-        log.error(f"  Sell failed: {r.get('ErrMsg')}")
-
-    time.sleep(2)
-    _, _, usd_after = get_btc_holding()
-    log.info(f"  USD after sell: ${usd_after:,.2f}")
-
-def fake_strategy():
-    """Looks like a real bot scanning for entries but RSI will never go below 1."""
-    prices = deque(maxlen=100)
-    tick = 0
-
-    log.info("")
-    log.info("  Strategy running: BB(20,2.0) + RSI(7) < 1")
-    log.info("  (This will never trigger)")
-    log.info("")
-
-    while True:
-        tick += 1
-        price = get_price()
-        if price:
-            prices.append(price)
-
-        utc = datetime.now(timezone.utc).strftime("%H:%M")
-
-        if tick % 10 == 0:
-            _, _, usd = get_btc_holding()
-            log.info(f"  T{tick} | {utc} UTC | ${price:,.2f} | ${usd:,.2f} USD | Scanning...")
-
-        time.sleep(POLL_INTERVAL)
+        log.warning(f"  Sell rejected: {r.get('ErrMsg')}")
+        return False
 
 if __name__ == "__main__":
     log.info("=" * 50)
-    log.info("  FLATTEN & IDLE")
+    log.info(f"  {COIN} BOT — TP={TAKE_PROFIT_PCT*100:.1f}% SL={STOP_LOSS_PCT*100:.1f}%")
     log.info("=" * 50)
 
-    log.info("  Step 1: Selling all BTC...")
-    sell_all_btc()
+    decimals = get_qty_decimals()
+    log.info(f"  Pair: {PAIR} | Qty decimals: {decimals}")
 
+    usd = get_usd()
+    log.info(f"  Balance: ${usd:,.2f} USD")
+
+    prices = deque(maxlen=100)
+    entry_price = 0
+    units = 0
+    in_pos = False
+    done = False
+    tick = 0
+
+    log.info(f"  Entry: RSI({RSI_PERIOD}) < {RSI_THRESHOLD}")
+    log.info(f"  Exit:  TP=+{TAKE_PROFIT_PCT*100:.1f}% | SL=-{STOP_LOSS_PCT*100:.1f}%")
     log.info("")
-    log.info("  Step 2: Running idle strategy...")
+
     try:
-        fake_strategy()
+        while True:
+            tick += 1
+            price = get_price()
+            if price is None:
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            prices.append(price)
+            rsi = calc_rsi(prices, RSI_PERIOD)
+            utc = datetime.now(timezone.utc).strftime("%H:%M")
+
+            if not in_pos and not done:
+                # ── FLAT: wait for RSI entry ──
+                if rsi is not None and rsi < RSI_THRESHOLD:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.4f} | RSI={rsi:.1f} < {RSI_THRESHOLD} -> BUY")
+                    success, entry_price, units = buy_all(price, decimals)
+                    if success:
+                        in_pos = True
+                        tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
+                        sl_price = entry_price * (1 - STOP_LOSS_PCT)
+                        log.info(f"  Entry=${entry_price:,.4f} | TP=${tp_price:,.4f} | SL=${sl_price:,.4f}")
+                        log.info("")
+                else:
+                    rsi_str = f"{rsi:.1f}" if rsi else "warmup"
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.4f} | RSI={rsi_str} | Waiting...")
+
+            elif in_pos:
+                # ── IN POSITION: check TP / SL ──
+                tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
+                sl_price = entry_price * (1 - STOP_LOSS_PCT)
+                pnl_pct = (price / entry_price - 1) * 100
+
+                if price >= tp_price:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.4f} | P&L={pnl_pct:+.2f}% -> TAKE PROFIT")
+                    if sell_all(price, units, decimals, "TAKE_PROFIT"):
+                        in_pos = False
+                        done = True
+                        log.info(f"  Done. Bot will idle now.")
+                        log.info("")
+
+                elif price <= sl_price:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.4f} | P&L={pnl_pct:+.2f}% -> STOP LOSS")
+                    if sell_all(price, units, decimals, "STOP_LOSS"):
+                        in_pos = False
+                        done = True
+                        log.info(f"  Done. Bot will idle now.")
+                        log.info("")
+
+                elif tick % 10 == 0:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.4f} | P&L={pnl_pct:+.2f}% | TP=${tp_price:,.4f} SL=${sl_price:,.4f}")
+
+            elif done:
+                if tick % 10 == 0:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.4f} | IDLE — trade complete")
+
+            if tick <= RSI_PERIOD + 1:
+                time.sleep(5)
+            else:
+                time.sleep(POLL_INTERVAL)
+
     except KeyboardInterrupt:
         log.info("  Stopped.")
