@@ -89,23 +89,6 @@ else:
 
 # ── Current Conditions ──
 print("\n" + "=" * 55)
-print("  STRATEGY CONDITIONS")
-print("=" * 55)
-utc_now = datetime.now(timezone.utc)
-utc_hour = utc_now.hour
-in_window = 0 <= utc_hour < 8
-
-print(f"  UTC Time:     {utc_now.strftime('%Y-%m-%d %H:%M:%S')}")
-print(f"  Trade Window: {'OPEN  (00:00-08:00)' if in_window else 'CLOSED (need 00:00-08:00)'}")
-print(f"  Entry Needs:  RSI(21) < 22 + window OPEN")
-print(f"  Exit Needs:   RSI >= 40 OR price -3% OR 700 ticks")
-print(f"")
-if not in_window and not has_btc:
-    print(f"  >> Window CLOSED. Bot scanning but won't enter until 00:00 UTC.")
-elif in_window and not has_btc:
-    print(f"  >> Window OPEN. Bot scanning for RSI < 22 dip.")
-elif has_btc:
-    print(f"  >> Bot is HOLDING. Watching for exit signals.")
 
 # ── Recent Trades ──
 print("\n" + "=" * 55)
