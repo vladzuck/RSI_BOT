@@ -12,8 +12,8 @@ QTY_DECIMALS = 0
 POLL_INTERVAL = 60
 RSI_PERIOD = 7
 RSI_THRESHOLD = 50
-TAKE_PROFIT_PCT = 0.03      # +2%
-STOP_LOSS_PCT = 0.018       # -1.8%
+TAKE_PROFIT_PCT = 0.022      # +2%
+STOP_LOSS_PCT = 0.03       # -3%
 
 logging.basicConfig(
     level=logging.INFO,
@@ -184,8 +184,10 @@ if __name__ == "__main__":
     prices = deque(maxlen=100)
     entry_price = 0
     units = 0
-    in_pos = False
+    in_pos = True
     done = False
+    entry_price = 0.0872
+    units = 11327519
     tick = 0
 
     log.info(f"  Entry: RSI({RSI_PERIOD}) < {RSI_THRESHOLD}")
