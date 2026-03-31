@@ -21,7 +21,7 @@ API_KEY    = "pZZ9zVTcKdin9QtSpq4slzYtUDFDf1j1OSCh503YO2UyADi1uKl2y5zAyvFmKAkf"
 SECRET_KEY = "l8Zb6ebZi2RZcXZE6XCJUg8qOdHgb3sStveWr7Nj96MS8MteMyWSWG5Cku570Qk2"
 
 BASE_URL    = "https://mock-api.roostoo.com"
-PAIR        = "PAXG/USDT"
+PAIR        = "PAXG/USD"
 CAPITAL_PCT = 0.10       # 10% of free USDT
 TAKE_PROFIT = 0.008      # +0.8%
 STOP_LOSS   = 0.010      # -1.0%
