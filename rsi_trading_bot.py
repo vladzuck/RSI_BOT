@@ -1,291 +1,218 @@
-"""
-Roostoo PAXG/USDT — One-Shot RSI Bot
-======================================
-1. Collect 20 price ticks to compute RSI(14)
-2. If RSI < 50  -> BUY PAXG with 10% of free USDT (market order)
-3. Poll price every 10s; sell via market order when:
-     profit >= +0.8%  (take profit)
-     loss   >= -1.0%  (stop loss)
-4. Script exits.
-"""
 
-import time
-import hmac
-import hashlib
-import requests
+import requests, time, hmac, hashlib, logging, math
+from datetime import datetime, timezone
+from collections import deque
 
-# ─────────────────────────────────────────────
-#  Configuration
-# ─────────────────────────────────────────────
-API_KEY    = "pZZ9zVTcKdin9QtSpq4slzYtUDFDf1j1OSCh503YO2UyADi1uKl2y5zAyvFmKAkf"
+API_KEY = "pZZ9zVTcKdin9QtSpq4slzYtUDFDf1j1OSCh503YO2UyADi1uKl2y5zAyvFmKAkf"
 SECRET_KEY = "l8Zb6ebZi2RZcXZE6XCJUg8qOdHgb3sStveWr7Nj96MS8MteMyWSWG5Cku570Qk2"
+BASE_URL = "https://mock-api.roostoo.com"
 
-BASE_URL    = "https://mock-api.roostoo.com"
-PAIR        = "PAXG/USD"
-CAPITAL_PCT = 0.10       # 10% of free USDT
-TAKE_PROFIT = 0.008      # +0.8%
-STOP_LOSS   = 0.010      # -1.0%
-
-RSI_PERIOD    = 14
+PAIR = "PAXG/USD"
+COIN = "PAXG"
+TAKE_PROFIT_PCT = 0.008
+STOP_LOSS_PCT = 0.01
+RSI_PERIOD = 7
 RSI_THRESHOLD = 50
+POLL_INTERVAL = 60
 
-TICK_COUNT    = 20
-TICK_INTERVAL = 10        # seconds between ticks
-POLL_INTERVAL = 10        # seconds between PnL checks
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot.log")],
+)
+log = logging.getLogger("Bot")
 
+# ── API ──
+class API:
+    def __init__(self):
+        self.s = requests.Session()
+    def _ts(self):
+        return str(int(time.time() * 1000))
+    def _sign(self, payload):
+        payload["timestamp"] = self._ts()
+        sp = "&".join(f"{k}={payload[k]}" for k in sorted(payload.keys()))
+        sig = hmac.new(SECRET_KEY.encode(), sp.encode(), hashlib.sha256).hexdigest()
+        return {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sig}, payload, sp
+    def exchange_info(self):
+        return self.s.get(f"{BASE_URL}/v3/exchangeInfo", timeout=10).json()
+    def ticker(self, pair):
+        return self.s.get(f"{BASE_URL}/v3/ticker", params={"timestamp": self._ts(), "pair": pair}, timeout=10).json()
+    def balance(self):
+        h, p, _ = self._sign({})
+        return self.s.get(f"{BASE_URL}/v3/balance", headers=h, params=p, timeout=10).json()
+    def place_order(self, pair, side, qty):
+        payload = {"pair": pair, "side": side, "type": "MARKET", "quantity": str(qty)}
+        h, _, tp = self._sign(payload)
+        h["Content-Type"] = "application/x-www-form-urlencoded"
+        return self.s.post(f"{BASE_URL}/v3/place_order", headers=h, data=tp, timeout=10).json()
 
-# ═══════════════════════════════════════════════════════════════
-#  Roostoo API helpers
-# ═══════════════════════════════════════════════════════════════
+api = API()
 
-def _timestamp():
-    return str(int(time.time() * 1000))
-
-
-def _sign(payload: dict):
-    # FIX 1: work on a copy so the caller's dict is never mutated
-    payload = dict(payload)
-    payload["timestamp"] = _timestamp()
-    sorted_keys  = sorted(payload.keys())
-    total_params = "&".join(f"{k}={payload[k]}" for k in sorted_keys)
-    sig = hmac.new(
-        SECRET_KEY.encode("utf-8"),
-        total_params.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    headers = {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sig}
-    return headers, total_params
-
-
-def get_ticker(pair: str):
-    """Return LastPrice (float) or None on any failure."""
-    try:
-        r = requests.get(
-            f"{BASE_URL}/v3/ticker",
-            params={"timestamp": _timestamp(), "pair": pair},
-            timeout=10,
-        )
-        r.raise_for_status()   # FIX 2: was missing — HTTP errors silently returned bad JSON
-        data = r.json()
-        if data.get("Success") and pair in data.get("Data", {}):
-            return float(data["Data"][pair]["LastPrice"])
-        print(f"  [ticker] API error: {data.get('ErrMsg')}")
-    except Exception as e:
-        print(f"  [ticker] Request failed: {e}")
-    return None
-
-
-def get_balance():
-    """Return wallet dict or None."""
-    try:
-        headers, total_params = _sign({})
-        # FIX 3: _sign returns an encoded string; GET needs a proper dict for params
-        params = dict(item.split("=", 1) for item in total_params.split("&"))
-        r = requests.get(
-            f"{BASE_URL}/v3/balance",
-            headers=headers,
-            params=params,
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("Success"):
-            return data["Wallet"]
-        print(f"  [balance] API error: {data.get('ErrMsg')}")
-    except Exception as e:
-        print(f"  [balance] Request failed: {e}")
-    return None
-
-
-def place_market_order(pair, side, quantity):
-    """Place a MARKET order. Returns OrderDetail dict or None."""
-    try:
-        url = f"{BASE_URL}/v3/place_order"
-        payload = {
-            "pair":     pair,
-            "side":     side.upper(),
-            "type":     "MARKET",
-            "quantity": str(quantity),
-        }
-        headers, total_params = _sign(payload)
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        r    = requests.post(url, headers=headers, data=total_params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("Success"):
-            return data["OrderDetail"]
-        print(f"  [order] API error: {data.get('ErrMsg')}")
-    except Exception as e:
-        print(f"  [order] Request failed: {e}")
-    return None
-
-
-def sell_with_retry(pair, quantity, retries=3):
-    """
-    FIX 4: original broke out of the monitor loop even when SELL failed,
-    leaving an unprotected open position. Now retries up to 3 times.
-    Returns True only on confirmed success.
-    """
-    for attempt in range(1, retries + 1):
-        print(f"  Sell attempt {attempt}/{retries}...")
-        result = place_market_order(pair, "SELL", quantity)
-        if result is not None:
-            return True
-        if attempt < retries:
-            time.sleep(3)
-    return False
-
-
-# ═══════════════════════════════════════════════════════════════
-#  RSI — Wilder's smoothing
-# ═══════════════════════════════════════════════════════════════
-
-def compute_rsi(prices: list, period: int = 14):
-    if len(prices) < period + 1:
+# ── RSI (Wilder's) ──
+def calc_rsi(prices):
+    if len(prices) < RSI_PERIOD + 1:
         return None
-
+    data = list(prices)
     gains, losses = [], []
-    for i in range(1, len(prices)):
-        d = prices[i] - prices[i - 1]
-        gains.append(max(d, 0.0))
-        losses.append(max(-d, 0.0))
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
-    if avg_loss == 0:
+    for i in range(1, len(data)):
+        d = data[i] - data[i - 1]
+        gains.append(max(0, d))
+        losses.append(max(0, -d))
+    if len(gains) < RSI_PERIOD:
+        return None
+    ag = sum(gains[:RSI_PERIOD]) / RSI_PERIOD
+    al = sum(losses[:RSI_PERIOD]) / RSI_PERIOD
+    for i in range(RSI_PERIOD, len(gains)):
+        ag = (ag * (RSI_PERIOD - 1) + gains[i]) / RSI_PERIOD
+        al = (al * (RSI_PERIOD - 1) + losses[i]) / RSI_PERIOD
+    if al == 0:
         return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+    return 100 - (100 / (1 + ag / al))
 
+# ── Helpers ──
+def get_price():
+    try:
+        d = api.ticker(PAIR)
+        if d.get("Success"):
+            return d["Data"][PAIR]["LastPrice"]
+    except:
+        pass
+    return None
 
-# ═══════════════════════════════════════════════════════════════
-#  Main
-# ═══════════════════════════════════════════════════════════════
+def get_usd():
+    try:
+        w = api.balance().get("SpotWallet", api.balance().get("Wallet", {}))
+        return w.get("USD", {}).get("Free", 0)
+    except:
+        return 0
 
-def main():
-    print("=" * 55)
-    print(f"  Roostoo One-Shot Bot  |  {PAIR}")
-    print(f"  RSI < {RSI_THRESHOLD}  |  TP +{TAKE_PROFIT*100:.1f}%  |  SL -{STOP_LOSS*100:.1f}%")
-    print("=" * 55)
+def get_qty_decimals():
+    try:
+        info = api.exchange_info()
+        pair_info = info.get("TradePairs", {}).get(PAIR, {})
+        step = pair_info.get("StepSize", None)
+        if step and '.' in str(step):
+            return len(str(step).rstrip('0').split('.')[-1])
+        elif step:
+            return 0
+    except:
+        pass
+    return 2
 
-    # ── Step 1: Collect price ticks for RSI ──────────────────
-    print(f"\n[1/4] Collecting {TICK_COUNT} ticks (~{TICK_COUNT * TICK_INTERVAL}s)...")
-    prices = []
-    for i in range(TICK_COUNT):
-        price = get_ticker(PAIR)
-        if price is None:
-            print("  Failed to get price. Aborting.")
-            return
-        prices.append(price)
-        print(f"  Tick {i+1:02d}/{TICK_COUNT}  price={price:.4f}")
-        if i < TICK_COUNT - 1:
-            time.sleep(TICK_INTERVAL)
-
-    # ── Step 2: Evaluate RSI ──────────────────────────────────
-    rsi = compute_rsi(prices, RSI_PERIOD)
-    if rsi is None:
-        print("  Not enough data for RSI. Aborting.")
-        return
-
-    print(f"\n[2/4] RSI(14) = {rsi:.2f}")
-    if rsi >= RSI_THRESHOLD:
-        print(f"  RSI {rsi:.2f} >= {RSI_THRESHOLD} — no entry. Exiting.")
-        return
-    print(f"  RSI {rsi:.2f} < {RSI_THRESHOLD} — entry signal confirmed!")
-
-    # ── Step 3: Size and place the BUY ───────────────────────
-    print("\n[3/4] Placing BUY order...")
-
-    wallet = get_balance()
-    if wallet is None:
-        print("  Could not fetch balance. Aborting.")
-        return
-
-    free_usdt = 0.0
-    for key in ("USDT", "USD"):
-        if key in wallet:
-            free_usdt = float(wallet[key].get("Free", 0))
-            print(f"  Free balance: {free_usdt:.2f} {key}")
-            break
-
-    if free_usdt < 1.0:
-        print(f"  Insufficient balance ({free_usdt:.2f}). Aborting.")
-        return
-
-    last_price = prices[-1]
-    capital    = free_usdt * CAPITAL_PCT
-    quantity   = round(capital / last_price, 6)
-
-    if quantity <= 0:
-        print("  Computed quantity is zero. Aborting.")
-        return
-
-    print(f"  Using {capital:.2f} USDT -> buying {quantity} PAXG at ~{last_price:.4f}")
-
-    buy = place_market_order(PAIR, "BUY", quantity)
-    if buy is None:
-        print("  BUY order failed. Aborting.")
-        return
-
-    # FIX 5: FilledAverPrice can be 0 on the mock even for filled orders
-    filled_price = buy.get("FilledAverPrice")
-    entry = float(filled_price) if filled_price and float(filled_price) > 0 else last_price
-    print(f"  BUY confirmed | entry = {entry:.4f}")
-
-    # ── Step 4: Monitor PnL ──────────────────────────────────
-    print(f"\n[4/4] Monitoring PnL every {POLL_INTERVAL}s...")
-    print(f"  Entry={entry:.4f}  TP>={entry*(1+TAKE_PROFIT):.4f}  SL<={entry*(1-STOP_LOSS):.4f}")
-
-    consecutive_errors = 0
-    MAX_ERRORS = 5
-
-    while True:
-        time.sleep(POLL_INTERVAL)
-
-        current_price = get_ticker(PAIR)
-
-        if current_price is None:
-            consecutive_errors += 1
-            print(f"  Price fetch failed ({consecutive_errors}/{MAX_ERRORS})...")
-            if consecutive_errors >= MAX_ERRORS:
-                # FIX 6: if price is unreachable we are flying blind — emergency sell
-                print("  Too many errors — emergency SELL to protect position!")
-                if sell_with_retry(PAIR, quantity):
-                    print("  Emergency SELL executed.")
-                else:
-                    print("  !! Emergency SELL FAILED — close position manually !!")
-                break
-            continue
-
-        consecutive_errors = 0
-        pnl_pct = (current_price - entry) / entry * 100
-        print(f"  Price={current_price:.4f}  PnL={pnl_pct:+.3f}%")
-
-        if pnl_pct >= TAKE_PROFIT * 100:
-            print(f"\n  TAKE PROFIT hit ({pnl_pct:+.3f}%) — selling...")
-            if sell_with_retry(PAIR, quantity):
-                print(f"  SELL confirmed. Closed with +{pnl_pct:.3f}% profit.")
-            else:
-                print("  !! SELL FAILED after retries — close position manually !!")
-            break
-
-        if pnl_pct <= -(STOP_LOSS * 100):
-            print(f"\n  STOP LOSS hit ({pnl_pct:+.3f}%) — selling...")
-            if sell_with_retry(PAIR, quantity):
-                print(f"  SELL confirmed. Closed with {pnl_pct:.3f}% loss.")
-            else:
-                print("  !! SELL FAILED after retries — close position manually !!")
-            break
-
-    print("\n" + "=" * 55)
-    print("  Bot finished.")
-    print("=" * 55)
-
-
+# ── Main ──
 if __name__ == "__main__":
-    main()
+    log.info("=" * 55)
+    log.info(f"  {COIN} BOT — TP +{TAKE_PROFIT_PCT*100:.1f}% | SL -{STOP_LOSS_PCT*100:.1f}%")
+    log.info("=" * 55)
+
+    decimals = get_qty_decimals()
+    log.info(f"  Pair: {PAIR} | Qty decimals: {decimals}")
+    log.info(f"  USD: ${get_usd():,.2f}")
+    log.info("")
+
+    prices = deque(maxlen=500)
+    entry_price = 0.0
+    units = 0.0
+    state = "WAITING"  # WAITING -> HOLDING -> DONE
+    tick = 0
+
+    try:
+        while True:
+            tick += 1
+            utc = datetime.now(timezone.utc).strftime("%H:%M")
+
+            try:
+                price = get_price()
+            except:
+                price = None
+
+            if price is None:
+                log.warning(f"  T{tick} | {utc} UTC | Price fetch failed")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            prices.append(price)
+            rsi = calc_rsi(prices)
+            rsi_str = f"{rsi:.1f}" if rsi else "warmup"
+
+            # ── STATE: WAITING ──
+            if state == "WAITING":
+                if rsi is not None and rsi < RSI_THRESHOLD:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.2f} | RSI={rsi_str} < {RSI_THRESHOLD} -> BUY")
+
+                    usd = get_usd()
+                    alloc = usd * 0.10
+                    factor = 10 ** decimals
+                    qty = math.floor((alloc * 0.999) / price * factor) / factor
+
+                    if qty <= 0:
+                        log.error(f"  Qty too small (USD=${usd:.2f}, price=${price:.2f})")
+                        time.sleep(POLL_INTERVAL)
+                        continue
+
+                    log.info(f"  >>> BUY {COIN} {qty} @ ~${price:,.2f} (${alloc:,.2f}) <<<")
+                    try:
+                        r = api.place_order(PAIR, "BUY", qty)
+                        if r.get("Success"):
+                            d = r["OrderDetail"]
+                            entry_price = d.get("FilledAverPrice", price)
+                            units = d.get("FilledQuantity", qty)
+                            tp = entry_price * (1 + TAKE_PROFIT_PCT)
+                            sl = entry_price * (1 - STOP_LOSS_PCT)
+                            log.info(f"  FILLED {units} @ ${entry_price:,.2f}")
+                            log.info(f"  TP=${tp:,.2f} | SL=${sl:,.2f}")
+                            state = "HOLDING"
+                        else:
+                            log.warning(f"  Rejected: {r.get('ErrMsg')}")
+                    except Exception as e:
+                        log.error(f"  Buy failed: {e}")
+                else:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.2f} | RSI={rsi_str} | Waiting...")
+
+            # ── STATE: HOLDING ──
+            elif state == "HOLDING":
+                tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
+                sl_price = entry_price * (1 - STOP_LOSS_PCT)
+                pnl = (price / entry_price - 1) * 100
+                reason = None
+
+                if price >= tp_price:
+                    reason = "TAKE_PROFIT"
+                elif price <= sl_price:
+                    reason = "STOP_LOSS"
+
+                if reason:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.2f} | P&L={pnl:+.2f}% -> {reason}")
+                    factor = 10 ** decimals
+                    sell_qty = math.floor(units * factor) / factor
+                    if sell_qty <= 0:
+                        log.error(f"  Sell qty 0 (units={units})")
+                        time.sleep(POLL_INTERVAL)
+                        continue
+                    log.info(f"  >>> SELL {COIN} {sell_qty} @ ~${price:,.2f} | {reason} <<<")
+                    try:
+                        r = api.place_order(PAIR, "SELL", sell_qty)
+                        if r.get("Success"):
+                            ep = r["OrderDetail"].get("FilledAverPrice", price)
+                            log.info(f"  SOLD @ ${ep:,.2f} | {reason}")
+                            state = "DONE"
+                        else:
+                            log.warning(f"  Sell rejected: {r.get('ErrMsg')}")
+                    except Exception as e:
+                        log.error(f"  Sell failed: {e}")
+                else:
+                    log.info(f"  T{tick} | {utc} UTC | ${price:,.2f} | RSI={rsi_str} | P&L={pnl:+.2f}% | TP=${tp_price:,.2f} SL=${sl_price:,.2f}")
+
+            # ── STATE: DONE ──
+            elif state == "DONE":
+                log.info(f"  T{tick} | {utc} UTC | ${price:,.2f} | RSI={rsi_str} | Trade complete. Scanning...")
+
+            # Sleep
+            if tick <= RSI_PERIOD + 1:
+                time.sleep(5)
+            else:
+                time.sleep(POLL_INTERVAL)
+
+    except KeyboardInterrupt:
+        log.info("  Stopped.")
