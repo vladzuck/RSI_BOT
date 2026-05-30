@@ -1,8 +1,3 @@
-"""
-Account checker — run from your Mac anytime.
-Usage: python3 check_account.py
-"""
-
 import requests, time, hmac, hashlib, json
 from datetime import datetime, timezone
 
@@ -117,6 +112,7 @@ print("  Bot runs independently on EC2.")
 print("=" * 55)
 
 '''
+for aws:
 tail -50 ~/RSI_BOT/rsi_bot.log
 to check last logs
 '''
