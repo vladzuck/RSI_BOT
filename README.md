@@ -4,7 +4,7 @@ This repository contains the algorithmic trading logic, backtesting infrastructu
 
 🏆 **Competition Achievement:** Our team achieved the **highest overall composition score** during the first stage of the competition, outperforming peer algorithms in structural logic and execution efficiency.
 
-## ⚙️ Architecture & Components
+## Architecture & Components
 
 The system is built entirely in Python, utilizing historical tick data to validate quantitative models before deploying them into live execution pipelines.
 
@@ -14,11 +14,11 @@ The system is built entirely in Python, utilizing historical tick data to valida
 * `new_strategy.py` & `vdaw.py`: Experimental modules for testing alternative quantitative signals and market microstructure adaptations.
 * `check_account.py`: Account state synchronization script, ensuring safe margin and risk limits before order execution.
 
-## 🚀 Tech Stack
+## Tech Stack
 * **Language:** Python
 * **Focus:** Algorithmic Trading, Backtesting, Risk Management, Web3 API Integration
 
-## 📌 Usage
+## Usage
 *(Note: To run the live execution bots, ensure your API keys are securely stored in your environment variables and never hardcoded.)*
 
 1.  Clone the repository.
