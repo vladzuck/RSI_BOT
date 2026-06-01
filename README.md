@@ -20,6 +20,7 @@ The system is built entirely in Python, utilizing historical tick data to valida
 
 ## Usage
 *(Note: To run the live execution bots, ensure your API keys are securely stored in your environment variables and never hardcoded.)*
+API is represented, since competiton is already ended.
 
 1.  Clone the repository.
 2.  Install dependencies from your local virtual environment (`.venv`).
